@@ -1,0 +1,8 @@
+{
+  "id": "your-app-id",
+  "name": "Your App Name",
+  "entry": "index.html",
+  "width": 420,
+  "height": 740,
+  "permissions": ["storage"]
+}
