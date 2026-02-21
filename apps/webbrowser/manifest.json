@@ -1,0 +1,7 @@
+{
+  "id": "agentf-browser",
+  "name": "AgentF Browser",
+  "type": "native-qt",
+  "version": "2.0",
+  "capabilities": ["ipc-server", "dom-access"]
+}

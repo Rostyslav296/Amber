@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Browser</title>
+    <link rel="stylesheet" href="styles.css">
+    </head>
+<body>
+    <div class="nav-bar">
+        <div class="nav-controls">
+            <button id="backBtn" title="Back">←</button>
+            <button id="refreshBtn" title="Reload">↻</button>
+        </div>
+        
+        <form id="urlForm" class="url-input-container">
+            <span style="color:var(--accent); margin-right:8px;">🔒</span>
+            <input type="text" id="urlInput" placeholder="Enter website (e.g. wikipedia.org)" autocomplete="off">
+        </form>
+    </div>
+
+    <div class="content-area">
+        <iframe id="webBrowser" src=""></iframe>
+    </div>
+
+    <script src="agentf.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
