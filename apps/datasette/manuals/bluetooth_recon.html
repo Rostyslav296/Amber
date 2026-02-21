@@ -1,0 +1,90 @@
+<div class="manual-entry">
+    <h2>// MISSION: BLUETOOTH RECONNAISSANCE</h2>
+    
+    <div class="section">
+        <h3>1. TABLE OF CONTENTS (Home Screen)</h3>
+        <p>This landing page summarizes the mission file <strong>ble_recon.db</strong>.</p>
+        <ul>
+            <li><strong style="color:#fff">INTEL_BRIEFING:</strong> The "Spy Report." Read this first for plain-text threat assessment.</li>
+            <li><strong style="color:#fff">Device_Radar:</strong> A heatmap sorted by signal strength (Proximity).</li>
+            <li><strong style="color:#fff">ble_devices:</strong> The raw data bucket containing every captured packet.</li>
+        </ul>
+    </div>
+
+    <div class="section">
+        <h3>2. SIGNAL INTELLIGENCE (RSSI)</h3>
+        <p>We use <strong>RSSI</strong> (Received Signal Strength Indicator) to triangulate physical distance.</p>
+        <table>
+            <tr style="background:#003300"><th>SIGNAL</th><th>ASSESSMENT</th></tr>
+            <tr>
+                <td style="color:#ff3333; font-weight:bold;">-40 to -50</td>
+                <td><strong>CRITICAL CONTACT.</strong> Target is touching you, in a pocket, or inside the host machine.</td>
+            </tr>
+            <tr>
+                <td style="color:#ffaa00; font-weight:bold;">-50 to -70</td>
+                <td><strong>VISUAL RANGE.</strong> Target is in the same room. Check for LEDs or casings.</td>
+            </tr>
+            <tr>
+                <td style="color:#00ff00; font-weight:bold;">-80 to -99</td>
+                <td><strong>GHOST SIGNAL.</strong> Target is obstructed by walls/floors or is >30ft away.</td>
+            </tr>
+        </table>
+    </div>
+
+    <div class="section">
+        <h3>3. MANUFACTURER FINGERPRINTING</h3>
+        <p>The system analyzes the <strong>OUI</strong> hex signature to identify hardware origin.</p>
+        <ul>
+            <li><strong>ID 76:</strong> Apple Ecosystem (iPhone, iPad, AirTag, Mac).</li>
+            <li><strong>ID 6:</strong> Microsoft Corp (Surface, Xbox).</li>
+            <li><strong>ID 0:</strong> Ericsson Infrastructure.</li>
+        </ul>
+    </div>
+
+    <h2 style="margin-top:40px; border-top: 1px dashed #004400; padding-top:20px;">// CLASSIFIED: ENGINEERING ARCHITECTURE</h2>
+
+    <div class="section">
+        <h3>4. SYSTEM ARCHITECTURE (The F-Stack)</h3>
+        <p>This tool demonstrates the <strong>Brain-Bucket-Monitor</strong> design pattern used by the AgentF Platform.</p>
+        <ol>
+            <li><strong>The Brain (FTerminal):</strong> Runs <code>scan-bluetooth-devices.py</code>. This script accesses the hardware radio via the <em>Bleak</em> library. It captures raw packets and calculates proximity logic.</li>
+            <li><strong>The Bucket (SQLite):</strong> The script creates a file <code>ble_recon.db</code>. It does not just dump data; it creates a <strong>Pre-Calculated View</strong> (<code>INTEL_BRIEFING</code>) so the dashboard doesn't have to do math.</li>
+            <li><strong>The Monitor (FDatasette):</strong> The script triggers the GUI via the Link Protocol. The GUI simply renders what is in the bucket.</li>
+        </ol>
+    </div>
+
+    <div class="section">
+        <h3>5. THE BRIDGE PROTOCOL (IPC)</h3>
+        <p>How FTerminal talks to FDatasette without them being the same app.</p>
+        <p><strong>The Link Script:</strong> <code>datasette_fterminal_link.py</code></p>
+        <p>This script acts as a courier. When the scan finishes, it executes the following logic:</p>
+        <pre style="background:#000; padding:10px; border:1px solid #004400; color:#0f0;">
+# 1. Locate the Socket
+SOCKET_PATH = "/tmp/fdatasette_sock.ipc"
+
+# 2. Pack the Payload
+payload = json.dumps({"db_path": "/abs/path/to/ble_recon.db"})
+
+# 3. Transmit
+client.connect(SOCKET_PATH)
+client.sendall(payload)</pre>
+        <p>The FDatasette window listens on this socket. When it receives the path, it kills its internal server, spins up a new one pointing at the new DB, and refreshes the view.</p>
+    </div>
+
+    <div class="section">
+        <h3>6. DEVELOPER GUIDE: ADAPTING FOR NEW TOOLS</h3>
+        <p>To create a new scanner (e.g., <strong>scan-wifi.py</strong>), copy the Bluetooth script and change the "Capture" and "Table" logic.</p>
+        <p><strong>Step-by-Step Template:</strong></p>
+        <ul>
+            <li><strong>Import the Link:</strong> Ensure <code>from datasette_fterminal_link import open_in_datasette</code> is at the top.</li>
+            <li><strong>Capture Data:</strong> Replace <code>BleakScanner</code> with your library (e.g., <code>nmap</code> or <code>scapy</code>).</li>
+            <li><strong>Create Schema:</strong>
+<pre style="background:#000; padding:5px; margin-top:5px; border:1px solid #333; color:#888;">
+c.execute("CREATE TABLE wifi_networks (ssid TEXT, security TEXT, channel INT)")
+</pre>
+            </li>
+            <li><strong>Generate Intel:</strong> Write a function that reads your raw table and inserts into <code>INTEL_BRIEFING</code> using simple if/else logic (e.g., "If encryption is 'OPEN', Alert Level = CRITICAL").</li>
+            <li><strong>Trigger:</strong> Call <code>open_in_datasette("wifi.db")</code> at the end.</li>
+        </ul>
+    </div>
+</div>
