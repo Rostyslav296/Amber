@@ -1,0 +1,140 @@
+# The F-Stack: Agentic Intelligence Platform
+**Version:** 1.0 (Genesis) | **Architecture:** Brain-Bucket-Monitor
+
+## 🏴 The Manifesto
+Standard AI Agents are blind and paralyzed. They can write text, but they cannot *see* the world or *remember* complex states.
+
+**The F-Stack** changes this. It is a "Super App" ecosystem that gives an AI Agent (like Amber) a complete OODA Loop (Observe, Orient, Decide, Act).
+1.  **FTerminal:** The Hands. (Execution & Action)
+2.  **FDatasette:** The Eyes & Memory. (Visualization & Recall)
+3.  **The Bridge:** The Nervous System. (Real-time IPC)
+
+---
+
+## 🏗 The Architecture: A Cybernetic Loop
+
+This system is not a linear script; it is a **circular feedback loop**.
+
+```mermaid
+graph TD
+    subgraph "EXECUTION (FTerminal)"
+        A[Agent AI] -->|1. Decides Action| B[Run Python Tool]
+        B -->|2. Touches Reality| C[Hardware/Network/OS]
+    end
+
+    subgraph "MEMORY (SQLite)"
+        B -->|3. Dumps Data| D[(The Bucket)]
+        D -.->|Persistent State| D
+    end
+
+    subgraph "VISUALIZATION (FDatasette)"
+        B -->|4. Signals Bridge| E[Unix Socket]
+        E -->|5. Wakes Monitor| F[Dashboard GUI]
+        F -->|6. Visual Feedback| G[Human Operator]
+    end
+
+
+🧠 Core Components
+
+1. FTerminal (The Executor)
+
+Role: The runtime environment where the Agent wields tools.
+
+Capability: It doesn't just "run code." It runs Self-Healing Agents.
+
+Auto-Dependency: "Missing library? I'll install it."
+
+Auto-Permission: "Permission denied? I'll pause and wait for the user."
+
+Philosophy: "Fire and Forget." The terminal captures the data, saves it to the Bucket, and moves on. It never worries about how to display it.
+
+2. FDatasette (The Monitor)
+
+Role: The high-performance, reactive visualization engine.
+
+Capability: It transforms raw SQL data into "Executive Intelligence."
+
+NSA-Style Dashboards: Dark mode, high-contrast metrics.
+
+Dynamic Manuals: Context-aware documentation that loads on demand.
+
+Live Updates: Refreshes instantly when the Terminal finishes a task.
+
+Philosophy: "Data is Useless without Context." It turns rows of numbers into Heatmaps, Intel Reports, and Graphs.
+
+⚡ Workflows: The Infinite Toolset
+Because the architecture is decoupled, you can build any tool in minutes without changing the platform code.
+
+📡 Workflow A: SIGINT (Signals Intelligence)
+
+The Tool: scan-bluetooth-devices.py
+
+The Action: Agent scans local radio frequencies.
+
+The Intelligence:
+
+Raw: RSSI -48, OUI: 4C:20:..
+
+FDatasette View: "CRITICAL CONTACT: Apple iPhone detected < 1ft away."
+
+Use Case: Security auditing, lost device recovery, occupancy detection.
+
+🌐 Workflow B: Cyber Recon (Planned)
+
+The Tool: scan-wifi-networks.py
+
+The Action: Agent puts the Wi-Fi card into monitor mode.
+
+The Intelligence:
+
+Raw: SSID "Hidden", Chan 6, Enc: WPA2.
+
+FDatasette View: Map of all unauthorized access points in your building.
+
+💾 Workflow C: The Second Brain (Planned)
+
+The Tool: index-local-knowledge.py
+
+The Action: Agent recursively reads your ~/Documents folder.
+
+The Intelligence:
+
+Raw: notes.txt, budget.xls.
+
+FDatasette View: A searchable, full-text index of your entire digital life. "Amber, show me every file where I mentioned 'Project X'."
+
+🛠 Ingenuity of Design
+1. The "Unix Philosophy"
+
+Most "Agent Apps" try to be one giant, bloated EXE file. The F-Stack is a collection of tiny, sharp tools.
+
+The Scanner doesn't know how to draw a UI.
+
+The UI doesn't know how to scan Bluetooth.
+
+Result: You can upgrade the UI to a web server, or swap the Scanner for a C++ binary, and the system keeps working.
+
+2. The "Intel Officer" Logic
+
+We don't just dump data. We generate Derived Intelligence.
+
+Bad AI: "Here is a list of 50 numbers."
+
+F-Stack: "I analyzed the 50 numbers. 49 are noise. 1 is a threat. Here is the threat."
+
+This is achieved via SQL Views and Post-Processing Logic inside the tools.
+
+3. The "Zero-Config" Bridge
+
+The system uses a Universal Link Script (datasette_fterminal_link.py).
+
+Any script, in any language, just needs to write a JSON packet to /tmp/fdatasette_sock.ipc.
+
+The Dashboard instantly obeys.
+
+No API keys, no cloud servers, no latency.
+
+🔮 The Future
+You have built the Operating System for your Agent. Today, it sees Bluetooth. Tomorrow, it manages your finances, monitors your server uptime, and organizes your research.
+
+Welcome to the F-Stack.
