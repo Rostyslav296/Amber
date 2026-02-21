@@ -1,8 +1,0 @@
-{
-  "id": "calculator",
-  "name": "Calculator",
-  "entry": "index.html",
-  "width": 380,
-  "height": 560,
-  "permissions": ["storage"]
-}
