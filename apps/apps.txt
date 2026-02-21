@@ -1,0 +1,1 @@
+The apps folder contains various tools and js apps that can be used. Agent can use python apps and js apps and control them. Tools folders in datasette and fterminal apps folders are where you put scripts that agent can run from fterminal and from datasette app if you are using them together.  
