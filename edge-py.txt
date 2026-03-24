@@ -1,0 +1,1487 @@
+================================================================================
+  AetherEdge v22.0 + Agent Swarm v3.2 — Complete Architecture Reference
+  Agent F (Amber) Browser Automation & Multi-Agent Coordination System
+  Last updated: March 5, 2026
+================================================================================
+
+TABLE OF CONTENTS
+─────────────────
+  1.  System Overview
+  2.  Hardware Target & Resource Budget
+  3.  File Map & Dependency Graph
+  4.  edge.py — AetherEdge v22.0 Architecture
+      4.1   Class Hierarchy
+      4.2   Browser Initialization Pipeline
+      4.3   Snapshot Engine (5-Tier Fallback)
+      4.4   Page Reading Engine (5-Tier Fallback)
+      4.5   Action Methods & Visual Feedback
+      4.6   Human-Like Input Primitives
+      4.7   Anti-Detection & Stealth
+      4.8   Element Resolution & Self-Healing Locators
+      4.9   Action Cache (Stagehand-Style Deterministic Replay)
+      4.10  Semantic Primitives (observe / act / extract)
+      4.11  Navigation Intelligence
+      4.12  404/Error Page Detection (v3.2)
+      4.13  CAPTCHA Detection
+      4.14  Overlay & Popup Dismissal
+      4.15  Iframe/Shadow DOM Piercing
+      4.16  Multi-Tab Orchestration
+      4.17  Network Interception & CDP
+      4.18  Server Mode Protocol
+  5.  agent.py — Orchestration Engine v3.2
+      5.1   Tool Registry & Discovery
+      5.2   ReAct Agent Loop
+      5.3   Context Window Management
+      5.4   Stall Detection & Recovery
+      5.5   Context-Sensitive Observation Hints
+      5.6   Swarm Coordinator (URL Extraction + Dual Mode)
+      5.7   Swarm Workers
+      5.8   SwarmAgentLoop (Unified Entry Point)
+      5.9   Dual-Mode Execution (Parallel Tabs + Sequential Clicks)
+  6.  ai.py — Entry Point & LLM Bridge
+      6.1   Model Loading
+      6.2   Token Budget & Generation
+      6.3   Think-Tag Streaming Filter
+      6.4   Swarm Mode UI
+  7.  Data Flow: End-to-End Request Lifecycle
+  8.  Upgrade Changelog (v21 → v22 + Swarm v3.2)
+  9.  Competitive Landscape Positioning
+  10. Configuration Reference
+  11. Performance Characteristics
+
+
+================================================================================
+1. SYSTEM OVERVIEW
+================================================================================
+
+Agent F (Amber) is a locally-hosted autonomous AI agent system that runs a
+Qwen 3.5-9B language model on Apple Silicon via MLX and controls Microsoft
+Edge browser through Playwright + Chrome DevTools Protocol (CDP).
+
+The system implements three key architectural patterns drawn from
+state-of-the-art browser agents:
+
+  PATTERN 1: ReAct Loop (Reason + Act)
+    observe → think → act → observe — the core sequential agent loop.
+    Each iteration: LLM receives page state, reasons about next step,
+    emits a JSON tool call, tool executes and returns result, LLM
+    receives observation. Continues until task complete or user stops.
+
+  PATTERN 2: Stagehand v3 Semantic Primitives
+    observe() → candidate elements for instruction
+    act()     → natural-language cached action with self-healing
+    extract() → structured JSON extraction with schema validation
+    These complement the lower-level click/fill/select actions.
+
+  PATTERN 3: Swarm Coordinator (Planner + Executor)
+    1 LLM coordinator decomposes multi-site tasks into parallel sub-plans.
+    N browser workers (max 3) execute pre-planned action sequences via
+    round-robin tab interleaving. Workers are deterministic — they don't
+    need their own LLM instances. Results are synthesized by the
+    coordinator for a unified response.
+
+The complete stack:
+
+  ┌─────────────────────────────────────────────┐
+  │  ai.py — CLI Entry Point                    │
+  │  Model loader, system prompt, chat loop     │
+  │  generate_fn: tokenize → MLX → stream       │
+  ├─────────────────────────────────────────────┤
+  │  agent.py — Orchestration Engine            │
+  │  SwarmAgentLoop ← AgentLoop                 │
+  │  SwarmCoordinator + SwarmWorker             │
+  │  Tool registry, parser, execution, stall    │
+  ├─────────────────────────────────────────────┤
+  │  edge.py — AetherEdge v22.0                 │
+  │  Playwright + CDP browser automation        │
+  │  82 methods, 4770 lines, 40+ actions        │
+  │  5-tier snapshot, visual feedback, stealth   │
+  └─────────────────────────────────────────────┘
+
+
+================================================================================
+2. HARDWARE TARGET & RESOURCE BUDGET
+================================================================================
+
+  Chip:           Apple M4
+  RAM:            16 GB unified memory
+  Model:          Qwen 3.5-9B (4-bit quantized via MLX)
+  Model footprint: ~5 GB in unified memory
+  OS + apps:      ~3 GB baseline
+  Available:      ~8 GB for KV cache, browser, workers
+
+  Context Window:
+    Qwen 3.5-9B native:      32,768 tokens
+    System prompt overhead:   ~4,000-5,000 tokens (tool instructions)
+    Observation budget:       16,000 chars (standard), 28,000 chars (content)
+    Context pruning threshold: 80,000 chars (~20K tokens)
+    Max generation tokens:    4,096 per response
+
+  Token Budget Rationale:
+    4,096 max_tokens is the sweet spot for M4 16GB because:
+    - KV cache for 32K context ≈ 2-3 GB at 9B 4-bit
+    - Leaves ~5 GB headroom for OS, Edge browser process, Playwright
+    - 4K generation allows complex multi-paragraph reasoning + JSON tool calls
+    - No OOM risk even on long conversations with context pruning active
+    - Going to 8K would work but risks memory pressure on ad-heavy pages
+      where Edge itself consumes 2-4 GB
+
+  Swarm Budget:
+    - 1 LLM instance (cannot run multiple Qwen 3.5-9B simultaneously)
+    - Up to 3 browser tabs active (each tab ≈ 100-500 MB depending on site)
+    - Round-robin execution serializes through single server process
+    - Total peak memory with 3-tab swarm: ~14-15 GB (safe on 16 GB)
+
+
+================================================================================
+3. FILE MAP & DEPENDENCY GRAPH
+================================================================================
+
+  /Users/r/Developer/llm/
+  ├── ai.py                    Entry point (220 lines)
+  │   ├── imports: mlx, mlx_lm, numpy, agent
+  │   └── calls: agent.get_agent_loop(), agent.get_system_prompt_addendum()
+  │
+  ├── agent.py                 Orchestration engine (1545 lines)
+  │   ├── imports: stdlib only (no ML deps)
+  │   ├── classes: AgentLoop, SwarmAgentLoop, SwarmCoordinator, SwarmWorker
+  │   └── spawns: agent-functions/*.py as subprocesses
+  │
+  ├── agent-functions/
+  │   ├── edge.py              AetherEdge v22.0 (4770 lines)
+  │   │   ├── imports: playwright, urllib
+  │   │   └── classes: ActionCache, AetherEdge
+  │   ├── safari.py            Safari automation (AppleScript + osascript)
+  │   ├── app-opener.py        macOS app launcher
+  │   ├── file-finder.py       File search
+  │   ├── fterminal.py         Terminal/shell execution
+  │   ├── agentf-weather.py    Weather lookup
+  │   ├── imessage.py          iMessage
+  │   └── experimental/        100+ experimental tools (not auto-loaded)
+  │
+  ├── qwen.npz                 Model manifest (contains HF repo pointer)
+  └── supplementary-files/     Build scripts, prompts
+
+  Dependency Flow:
+    ai.py ──imports──▶ agent.py ──spawns──▶ edge.py (subprocess)
+                          │                     │
+                          │ JSON stdin/stdout    │ Playwright + CDP
+                          │ (server mode)        │
+                          ▼                     ▼
+                     SwarmAgentLoop          Microsoft Edge
+                          │                     │
+                          ├──plan──▶ LLM        │
+                          ├──exec──▶ Workers ───▶ Tabs (round-robin)
+                          └──synth─▶ LLM
+
+
+================================================================================
+4. edge.py — AetherEdge v22.0 ARCHITECTURE
+================================================================================
+
+4770 lines. 82 methods. 2 classes. 40+ dispatchable actions.
+
+This is the most complex component — a production-grade browser automation
+engine that rivals Browser-Use, Stagehand, and Manus Browser Operator in
+capability while running entirely locally without cloud APIs.
+
+────────────────────────────────────────────────────────────────────────────
+4.1  CLASS HIERARCHY
+────────────────────────────────────────────────────────────────────────────
+
+  ActionCache (lines 196-241)
+  └── Persistent JSON file cache at ~/.agentf_edge_action_cache.json
+      hash(instruction + pageFingerprint) → cached locator strategy
+      Confidence threshold: 0.85
+      Enables Stagehand-style deterministic replay in <100ms
+
+  AetherEdge (lines 247-4706)
+  └── Main engine class. 80 methods. Manages:
+      - Playwright instance, Browser, BrowserContext, Page, CDPSession
+      - Element reference map (refs: #N → locator data, coords)
+      - ActionCache for deterministic replay
+      - fast_mode flag (agent mode = fast, human mode = visible)
+      - Stealth/anti-detection state
+      - Dialog/crash/popup handlers
+      - Iframe navigation state (_iframe_idx, _iframe_frame)
+
+────────────────────────────────────────────────────────────────────────────
+4.2  BROWSER INITIALIZATION PIPELINE
+────────────────────────────────────────────────────────────────────────────
+
+  _init_browser() implements a 3-tier launch strategy:
+
+  TIER 1: CDP Attach (port 9222)
+    - Check if Edge is already running with --remote-debugging-port=9222
+    - If so, attach via Playwright connect_over_cdp()
+    - Fastest path — reuses existing browser session with user's cookies/logins
+    - Preserves user's authenticated state (critical for survey sites)
+
+  TIER 2: Fresh Edge Launch (Playwright channel="msedge")
+    - playwright.chromium.launch_persistent_context()
+    - Uses persistent profile directory for cookie/session persistence
+    - Anti-detection flags injected via --disable-blink-features, etc.
+    - User-Agent set to genuine Edge string with Edg/ token
+    - Extensions, WebRTC, canvas fingerprinting handled
+    - Viewport: 1440x900 (MacBook-appropriate)
+
+  TIER 3: Chromium Fallback
+    - If Edge binary not found, falls back to Playwright's bundled Chromium
+    - Same feature set minus Edge-specific enterprise policies
+
+  Post-launch:
+    - _startup_cleanup() — handles "Restore pages" popup, closes blank tabs
+    - _inject_stealth() — overwrites navigator.webdriver, chrome.runtime, etc.
+    - _inject_hooks() — injects visual feedback system (cursor, highlights, overlay)
+
+────────────────────────────────────────────────────────────────────────────
+4.3  SNAPSHOT ENGINE (5-TIER FALLBACK)
+────────────────────────────────────────────────────────────────────────────
+
+  snapshot() — NEVER returns empty. Guaranteed page visibility for agents.
+
+  The snapshot is the agent's primary sensory input. It produces a structured
+  text representation of the page with numbered element references (#N),
+  viewport coordinates (@x,y), and semantic annotations.
+
+  TIER 1: _build_snapshot() — Full JS DOM Snapshot
+    - Injects ~300 lines of JavaScript that walks the DOM
+    - Extracts all interactive elements: buttons, links, inputs, selects,
+      textareas, checkboxes, radios, custom widgets
+    - Each element gets a data-agent-ref="N" attribute and an #N label
+    - Captures: tag, role, text, value, placeholder, aria-label, href,
+      bounding box (@x,y), visibility, disabled state
+    - Identifies form validation errors, checked/unchecked states
+    - Extracts page text (headings, paragraphs, list items)
+    - Output sections: === PAGE ===, === ELEMENTS ===, === TEXT ===,
+      === FORM STATUS ===, === DIALOG ===, === IFRAMES ===
+
+  TIER 2: _snapshot_simple() — Lightweight JS Snapshot
+    - Simplified JS that queries common interactive selectors
+    - Less comprehensive but works on pages where Tier 1 JS times out
+    - Common on heavily-obfuscated SPA frameworks
+
+  TIER 3: _snapshot_a11y() — Playwright Accessibility Tree API
+    - page.accessibility.snapshot() — uses Chrome's native A11Y tree
+    - 80-90% data reduction vs raw DOM (following Stagehand v3 approach)
+    - Recursive walk of A11Y nodes: walk_a11y(node, depth)
+    - Extracts: role, name, value, checked, level, links, descriptions
+    - No JS eval needed — works even when page JS is completely broken
+
+  TIER 4: _snapshot_native_pw() — Pure Playwright Locator Queries
+    - Uses Playwright's native locator API (no JS injection at all)
+    - Queries 12 interactive element selectors via CDP
+    - Falls back to pure WebDriver-style element queries
+    - Slowest but most reliable on hostile pages
+
+  TIER 5: _snapshot_emergency() — Raw HTML Parse + Screenshot
+    - page.content() → strip <script>/<style> → extract text
+    - Takes a screenshot for vision-ready fallback
+    - Returns "limited text extraction" with guidance message
+    - Final fallback — will always produce something
+
+  CAPTCHA Detection Layer:
+    - After snapshot, _detect_captcha() scans for reCAPTCHA, hCaptcha,
+      Cloudflare Turnstile iframes and div containers
+    - If detected, injects CAPTCHA_DETECTED warning into snapshot
+    - Agent receives clear signal to avoid wasting steps
+
+  Redirect Detection Layer:
+    - After new_tab()/browse(), compares requested URL vs actual page.url
+    - If they differ (via _urls_differ()), extracts nav menu and injects
+      redirect_warning with guidance to use page navigation instead
+
+────────────────────────────────────────────────────────────────────────────
+4.4  PAGE READING ENGINE (5-TIER FALLBACK)
+────────────────────────────────────────────────────────────────────────────
+
+  read_page() — NEVER returns empty. Optimized for article content extraction.
+
+  TIER 1: _read_page_js() — Full JS DOM Extraction
+    - JavaScript that extracts main content area
+    - Targets: <article>, <main>, [role=main], .content, .article-body
+    - Strips nav, footer, sidebar, ads, scripts
+    - Returns clean article text with preserved structure
+
+  TIER 2: Wait + Retry
+    - Waits for content to render (wait_for_function 8s + networkidle 3s)
+    - Retries _read_page_js() after the page has had time to hydrate
+    - Critical for SPAs that render content asynchronously
+
+  TIER 3: Playwright inner_text() on Content Containers
+    - Queries 12 content container selectors:
+      article, main, [role=main], .content, .article-body,
+      .post-content, .entry-content, #content, .story-body, etc.
+    - Uses Playwright's inner_text() — no JS eval needed
+    - Works when JS execution is blocked or broken
+
+  TIER 4: Full Page inner_text("body")
+    - page.inner_text("body") — extracts ALL visible text
+    - Noise filtering: strips common nav/footer patterns
+    - More text than needed but never empty
+
+  TIER 5: Raw HTML Parse
+    - page.content() → regex strip <script>/<style> tags
+    - Basic text extraction from raw HTML
+    - Final fallback — always produces content
+
+────────────────────────────────────────────────────────────────────────────
+4.5  ACTION METHODS & VISUAL FEEDBACK
+────────────────────────────────────────────────────────────────────────────
+
+  Every user-facing browser action now includes visual feedback so the user
+  can see what the agent is doing in real-time. The visual feedback system
+  consists of three components:
+
+  1. _highlight_ref(ref_n: int)
+     Injects a CSS highlight animation on the target element.
+     Calls __aether_highlight(el) in the browser — adds a pulsing
+     blue/green border + background flash that fades after 1.5s.
+
+  2. _show_action(msg: str)
+     Shows a status overlay in the bottom-left corner of the browser.
+     Green monospace text on dark semi-transparent background.
+     Displays current action: "Clicking #5", "Filling #8 = John", etc.
+
+  3. _hide_action()
+     Removes the status overlay after the action completes.
+
+  Action Methods with Visual Feedback:
+
+  click(text, click_type)         [line 2744]
+    _highlight_ref() → _show_action("Clicking #N") →
+    scroll_into_view → _bezier_move(to center) → click →
+    _detect_new_pages() → _hide_action() → snapshot
+
+  fill(text, value, fast)         [line 2922]
+    _highlight_ref() → _show_action("Filling: #N = value") →
+    scroll_into_view → detect field type (password/contenteditable) →
+    human_type or playwright.fill → dispatch input/change events →
+    _hide_action() → snapshot
+
+  select(text, value)             [line 3010]
+    _highlight_ref() → _show_action("Selecting: value") →
+    scroll_into_view → detect element type (native select / checkbox/radio /
+    custom dropdown) → select_option or click+find option →
+    _hide_action() → snapshot
+
+  check(text, desired_state)      [line 3112]
+    _highlight_ref() → _show_action("Checking: #N = state") →
+    detect current state → _click_checkbox (8 fallback strategies) →
+    _hide_action() → snapshot
+
+  hover(text)                     [line 3376]
+    _highlight_ref() → _show_action("Hovering: target") →
+    scroll_into_view → _bezier_move(to center) → hover →
+    _hide_action() → snapshot
+
+  new_tab(url)                    [line 2660]
+    _show_action("Opening: URL") → context.new_page() →
+    page.goto() → _inject_hooks() → wait_idle →
+    snapshot + redirect detection
+
+  browse(url)                     [line 2695]
+    _show_action("Navigating: URL") → page.goto() →
+    _inject_hooks() → wait_idle →
+    snapshot + redirect detection
+
+  scroll(direction, amount)       [line 3190]
+    _show_action("Scrolling direction") →
+    JS scrollBy({behavior: 'smooth'}) → 0.4-0.8s delay →
+    _hide_action() → snapshot
+
+  Additional Actions (no visual feedback needed — non-visual or instant):
+    click_at, keys, wait, search, video, tabs, back, forward,
+    iframe, cookies, window_manage, upload, download, find_in_page,
+    select_text, run_js, screenshot, drag, dismiss, observe, act,
+    extract, trace_save, network, cdp_command, stealth_mode
+
+────────────────────────────────────────────────────────────────────────────
+4.6  HUMAN-LIKE INPUT PRIMITIVES
+────────────────────────────────────────────────────────────────────────────
+
+  These primitives make the agent's browser interactions visually natural
+  and help bypass bot detection systems.
+
+  _bezier_move(x, y, steps=20)
+    Moves the mouse cursor along a cubic Bezier curve from current position
+    to target (x, y). Control points are randomized with ±100-200px jitter.
+    Minimum 8 steps to ensure visibility. Per-step delay: 8-18ms (fast mode)
+    or 15-45ms (slow mode). The cursor movement is visible via the injected
+    red dot CSS indicator (__aether_cursor).
+
+  _human_type(text, delay_range=(30, 90))
+    Types text character by character with randomized inter-key delays.
+    Delay range: 30-90ms per character. Simulates human typing cadence
+    with natural variance.
+
+  _human_delay(action)
+    Per-action-type delays calibrated for visual feedback:
+    Fast mode: click=120-250ms, fill_pre=80-150ms, scroll=80-150ms
+    Slow mode: click=300-800ms, fill_pre=200-500ms, scroll=200-400ms
+
+  Injected Visual Indicators (_inject_hooks):
+    - Red cursor dot: 20px red circle, position:fixed, follows mousemove
+    - Click ripple: Expanding circle animation at click coordinates
+    - Action overlay: Bottom-left green monospace text showing current action
+    - Element highlight: Pulsing blue border + background flash on target
+
+  Smooth Scrolling:
+    Uses window.scrollBy({top: N, behavior: 'smooth'}) instead of
+    raw mouse.wheel(). Provides visible smooth scroll animation that
+    the user can follow.
+
+────────────────────────────────────────────────────────────────────────────
+4.7  ANTI-DETECTION & STEALTH
+────────────────────────────────────────────────────────────────────────────
+
+  _inject_stealth() — Comprehensive anti-fingerprinting:
+    - navigator.webdriver = false (overwritten via Object.defineProperty)
+    - chrome.runtime with proper connect/sendMessage stubs
+    - navigator.plugins populated with realistic plugin list
+    - navigator.languages set to ["en-US", "en"]
+    - WebGL vendor/renderer strings spoofed
+    - Canvas fingerprint randomization
+    - Permissions API patched (notifications → "prompt")
+    - window.chrome object populated
+    - CDP detection evasion (Runtime.enable check)
+
+  Launch-level stealth:
+    - --disable-blink-features=AutomationControlled
+    - --disable-features=AutomationControlled,AutofillServerCommunication
+    - Genuine Edge User-Agent string with Edg/ token
+    - Persistent profile directory for cookie continuity
+    - No "Chrome is being controlled by automated test software" infobar
+
+────────────────────────────────────────────────────────────────────────────
+4.8  ELEMENT RESOLUTION & SELF-HEALING LOCATORS
+────────────────────────────────────────────────────────────────────────────
+
+  _resolve_target(text) — Multi-strategy element finder:
+
+  Strategy 1: Reference Number (#N)
+    Looks up data-agent-ref="N" attribute injected during last snapshot.
+    Direct DOM query: document.querySelector('[data-agent-ref="N"]')
+    Fastest path — O(1) lookup.
+
+  Strategy 2: Text Content Match
+    Playwright text= locator with exact and substring matching.
+    Falls back to case-insensitive search.
+
+  Strategy 3: CSS Selector
+    Direct CSS selector query for power users.
+
+  Strategy 4: ARIA / Role Match
+    Searches by aria-label, role, title attributes.
+
+  Self-Healing on Stale Refs:
+    When #N ref resolves to no element (page changed), the method:
+    1. Takes a fresh snapshot (which re-assigns all #N refs)
+    2. Returns STALE_REF hint to agent with fresh snapshot data
+    3. Agent sees updated element list and can retry with correct ref
+    Response time: <200ms for snapshot + re-resolution.
+
+  _click_checkbox(loc, ref_num) — 8-Strategy Checkbox Handler:
+    Survey sites use heavily obfuscated checkbox implementations.
+    This method tries 8 strategies in order:
+    1. Playwright loc.check() (standard)
+    2. JS el.click() (bypass pointer-events)
+    3. Parent label click (label-wrapped inputs)
+    4. Sibling label click (label[for=id])
+    5. JS checked property + dispatchEvent
+    6. Container div click (custom checkbox widgets)
+    7. Visibility override + click (display:none inputs)
+    8. Force-click via CDP Input.dispatchMouseEvent
+    Handles: hidden inputs, pointer-events:none, React synthetic events,
+    Vue v-model sync, Angular form control, ARIA checkbox roles.
+
+────────────────────────────────────────────────────────────────────────────
+4.9  ACTION CACHE (Stagehand-Style Deterministic Replay)
+────────────────────────────────────────────────────────────────────────────
+
+  ActionCache persists successful action strategies to disk:
+    ~/.agentf_edge_action_cache.json
+
+  Cache key: SHA256(instruction + page_fingerprint)
+  Cache value: {selector, strategy, confidence, timestamp}
+  Confidence threshold: 0.85
+
+  When act() is called:
+    1. Compute page fingerprint (URL + DOM structure hash)
+    2. Check cache for matching key
+    3. If cached with confidence >= 0.85, replay directly (<100ms)
+    4. If not cached, use LLM-guided element selection
+    5. On success, store strategy in cache for future replay
+
+  _page_fingerprint():
+    Hashes: URL hostname + page title + count of interactive elements
+    Fast to compute, stable across minor page changes.
+
+────────────────────────────────────────────────────────────────────────────
+4.10  SEMANTIC PRIMITIVES (observe / act / extract)
+────────────────────────────────────────────────────────────────────────────
+
+  Stagehand v3 compatible atomic primitives:
+
+  observe(instruction: str) → Dict
+    Returns A11Y-enriched candidate elements matching the instruction.
+    Uses the accessibility tree snapshot filtered by semantic relevance.
+    Candidates include: role, name, coordinates, suggested action.
+    Preview-before-execute pattern — shows what AI intends to do.
+
+  act(instruction: str) → Dict
+    Natural-language action execution with caching:
+    1. Check ActionCache for deterministic replay
+    2. If not cached, snapshot page, find matching elements
+    3. Execute the inferred action (click, fill, select, etc.)
+    4. Cache successful strategy for future replay
+    5. Self-healing: if cached strategy fails, re-observe and retry
+
+  extract(instruction: str) → Dict
+    Structured data extraction with schema validation:
+    1. Snapshot page for current DOM state
+    2. Parse extraction instruction (e.g., "get all product prices")
+    3. Execute JS query or text parsing to extract structured data
+    4. Return typed JSON result
+
+────────────────────────────────────────────────────────────────────────────
+4.11  NAVIGATION INTELLIGENCE
+────────────────────────────────────────────────────────────────────────────
+
+  Redirect Detection:
+    After new_tab(url) and browse(url):
+    - Compares requested URL vs actual page.url via _urls_differ()
+    - _urls_differ() normalizes: strips trailing slashes, www prefix,
+      compares netloc + path (ignores query params and fragments)
+    - If redirect detected, calls _extract_nav_menu()
+    - Injects redirect_warning into snapshot result with guidance:
+      "Do NOT retry the same URL. Use nav links instead."
+
+  Nav Menu Extraction (_extract_nav_menu):
+    - Queries: nav, header, [role=navigation], .navbar, .nav-menu,
+      .menu, #menu, .site-header selectors
+    - Extracts all <a> links within navigation containers
+    - Returns formatted list: "Link Text → href URL"
+    - Agent can use these to click the correct nav item
+
+  Click-Through Navigation Fallback:
+    In click(), when clicking a nav link doesn't change the URL:
+    - Extracts href attribute from the clicked element
+    - Tries page.goto(href) as direct navigation fallback
+    - Handles SPAs where link clicks trigger JS routing but URL
+      doesn't change from the agent's perspective
+
+────────────────────────────────────────────────────────────────────────────
+4.12  404/ERROR PAGE DETECTION (v3.2)
+────────────────────────────────────────────────────────────────────────────
+
+  _detect_404(snap) — checks navigation results for error pages:
+    - Title contains: "404", "not found", "something has gone wrong"
+    - URL contains: "err=404", "/404"
+    - Page text contains: "we couldn't find that page", "page not found"
+
+  When detected:
+    - snap["error_404"] = True
+    - snap["redirect_warning"] = "404 ERROR: ... Do NOT retry it."
+    - Agent guided to use click actions instead of URL navigation
+    - Swarm workers auto-marked as failed (status="error")
+
+  Called from: new_tab(), browse() — AFTER redirect detection.
+  Also checked by SwarmCoordinator._is_404_or_error() during worker execution.
+
+────────────────────────────────────────────────────────────────────────────
+4.13  CAPTCHA DETECTION
+────────────────────────────────────────────────────────────────────────────
+
+  _detect_captcha() scans for:
+    - reCAPTCHA: iframe[src*="recaptcha"], .g-recaptcha, #recaptcha
+    - hCaptcha: iframe[src*="hcaptcha"], .h-captcha
+    - Cloudflare Turnstile: iframe[src*="challenges.cloudflare"],
+      .cf-turnstile, #cf-turnstile
+    - Generic: [class*="captcha"], [id*="captcha"]
+
+  When detected:
+    - Snapshot result includes CAPTCHA_DETECTED marker
+    - Agent receives explicit guidance: "go back, try different link"
+    - Prevents wasted steps attempting to solve unsolvable CAPTCHAs
+
+────────────────────────────────────────────────────────────────────────────
+4.13  OVERLAY & POPUP DISMISSAL
+────────────────────────────────────────────────────────────────────────────
+
+  _dismiss_overlays() — 60+ pattern matching for common overlays:
+
+  Cookie Consent / GDPR: Accept, Allow, Agree, Got it, OK, Consent
+  Notification Prompts: Not now, No thanks, Dismiss, Later, Block
+  Newsletter / Email Popups: Close (X), No thanks, Maybe later
+  Survey Interstitials: Close, Skip, Not interested
+  Edge "Restore Pages": Handles the Edge-specific restore dialog
+  Swagbucks-specific: Recommended surveys, daily polls, sidebar ads
+  Generic modals: [role=dialog] close buttons, overlay backdrop clicks
+  Fixed/sticky overlays: z-index > 999 overlays removed via DOM
+
+  Two-pass execution:
+    Pass 1: Click visible dismiss/close/accept buttons
+    Pass 2: Force-remove remaining fixed/sticky overlays via JS
+
+  Special: _handle_restore_popup()
+    Edge-specific handler for the "Restore pages?" popup that appears
+    after crashes. Clicks "Don't restore" or removes the dialog DOM.
+
+────────────────────────────────────────────────────────────────────────────
+4.14  IFRAME / SHADOW DOM PIERCING
+────────────────────────────────────────────────────────────────────────────
+
+  iframe(action) method:
+    "list" → enumerate all iframes on page with src/name/index
+    "enter N" → switch execution context to iframe at index N
+    "exit" → return to main frame
+
+  Shadow DOM:
+    Playwright's native shadow DOM piercing via :scope and
+    page.locator() handles open shadow roots automatically.
+    Snapshot JS walks shadow DOMs via el.shadowRoot.querySelectorAll().
+
+  Survey Site Pattern:
+    Survey sites (Swagbucks, PrizeRebel, etc.) frequently load survey
+    content inside iframes. The agent system prompt includes explicit
+    guidance: "If snapshot is empty/sparse, try iframe list → enter 0"
+
+  _detect_survey_iframe():
+    Heuristic detection of survey iframes by src URL patterns:
+    surveyjunkie, surveywall, peanutlabs, yoursurveys, cint,
+    toluna, samplicio, etc.
+
+────────────────────────────────────────────────────────────────────────────
+4.15  MULTI-TAB ORCHESTRATION
+────────────────────────────────────────────────────────────────────────────
+
+  tabs(action) method:
+    "list"      → show all tabs with titles/URLs, current tab marked with →
+    "switch N"  → switch to tab N (1-indexed), bring_to_front()
+    "close"     → close current tab, switch to last remaining
+    "next/prev" → cycle tabs
+    "new"       → open blank new tab
+
+  Auto-popup detection (_detect_new_pages):
+    After every click(), the engine checks if new pages/popups opened:
+    - Compares context.pages count before and after click
+    - If new page detected, auto-switches to it
+    - Returns navigation info so agent knows about the new tab
+    - Critical for survey sites that open in new tabs/popups
+
+  Swarm Tab Assignment:
+    During swarm execution, each worker's first step is new_tab().
+    The coordinator tracks tab indices for tab-switching between workers.
+
+────────────────────────────────────────────────────────────────────────────
+4.16  NETWORK INTERCEPTION & CDP
+────────────────────────────────────────────────────────────────────────────
+
+  network(action) method:
+    "monitor" → log all requests/responses with timing
+    "block_ads" → block common ad/tracking domains
+    "capture" → capture response bodies for specific URLs
+    "clear" → stop interception
+
+  cdp_command(method, params_json) method:
+    Direct Chrome DevTools Protocol access:
+    - Runtime.evaluate, DOM.getDocument, Network.enable
+    - Performance metrics, coverage data, heap snapshots
+    - Input.dispatchMouseEvent for force-click scenarios
+    - Page.captureScreenshot for vision pipeline
+
+────────────────────────────────────────────────────────────────────────────
+4.17  SERVER MODE PROTOCOL
+────────────────────────────────────────────────────────────────────────────
+
+  edge.py supports two execution modes:
+
+  One-Shot Mode: python edge.py --json '{"action":"snapshot"}'
+    - Launches browser, executes single action, returns result, exits
+    - Slow startup (~3-5s) but no persistent process
+
+  Server Mode: python edge.py --server
+    - Prints handshake: {"status": "mcp_ready", "version": "v22.0_aetheredge"}
+    - Enters stdin/stdout JSON-line loop
+    - Receives: {"action": "click", "text": "#5"} on stdin
+    - Returns: {"status": "success", "page": "...", ...} on stdout
+    - Process stays alive — subsequent commands skip browser launch
+    - Response time: <100ms for cached actions, ~500ms for navigation
+
+  Server mode is used by agent.py for persistent browser sessions.
+  The agent.py execute_tool() function manages server lifecycle:
+    - Auto-starts server on first tool call
+    - Detects crashes and auto-restarts
+    - 90-second read timeout with automatic restart on hang
+    - Clean shutdown via AgentLoop.cleanup()
+
+
+================================================================================
+5. agent.py — ORCHESTRATION ENGINE v3.0
+================================================================================
+
+1545 lines. 5 classes. 15 functions.
+
+────────────────────────────────────────────────────────────────────────────
+5.1  TOOL REGISTRY & DISCOVERY
+────────────────────────────────────────────────────────────────────────────
+
+  load_tools() scans agent-functions/*.py at import time.
+
+  Discovery Strategy A: AST Parse
+    - Parses each .py file into an AST
+    - Looks for TOOL_METADATA = {...} assignment
+    - Extracts: name, description, parameters schema
+    - Detects server mode support by checking for "--server" in file content
+
+  Discovery Strategy B: Legacy Regex
+    - Scans for # AGENTCMD:name=X;description=Y header comment
+    - Backward compatible with older tool scripts
+
+  Registry Format:
+    registry = {
+        "edge": {
+            "path": "/path/to/edge.py",
+            "meta": {"name": "edge", "description": "...", "parameters": {...}},
+            "server_mode": True,
+        },
+        "safari": { ... },
+        ...
+    }
+
+  System Prompt Addendum:
+    load_tools() also generates a ~4000-token instruction block covering:
+    - Tool call JSON format and protocol
+    - Research workflow (search → open tabs → read → synthesize)
+    - Navigation rules (redirect handling, click existing links)
+    - Form filling workflow (batch fills, checkbox handling)
+    - Survey tactics (iframe detection, default answers, speed rules)
+    - Popup dismissal protocol
+    - CAPTCHA handling
+    - Stall recovery (empty snapshot, repeated actions)
+
+────────────────────────────────────────────────────────────────────────────
+5.2  ReAct AGENT LOOP
+────────────────────────────────────────────────────────────────────────────
+
+  class AgentLoop — the core sequential execution engine.
+
+  Loop Flow (AgentLoop._loop):
+    while step < max_steps:
+      1. Check stop event (Ctrl+S, Ctrl+C, "stop")
+      2. Prune context if over 80K chars
+      3. Call generate_fn(messages) → LLM text response (streamed)
+      4. parse_tool_call(response) → extract JSON tool call
+      5. If no tool call → task complete, return response
+      6. If tool call found:
+         a. execute_tool(name, args, persistent) → run tool subprocess
+         b. _smart_truncate(result) → fit result into observation budget
+         c. _detect_stall(name, action) → check for loops
+         d. Build observation suffix with context-sensitive hints
+         e. Append as messages: assistant (LLM response), user (tool result)
+      7. Loop back to step 1
+
+  Tool Call Parser (parse_tool_call):
+    - Strips <think> blocks from response
+    - Balanced-brace extraction finds all JSON candidates
+    - Tries json.loads(), falls back to ast.literal_eval()
+    - Validates: data["tool"] must exist in registry
+    - Returns first valid tool call
+
+  Tool Execution (execute_tool):
+    Server Mode:
+      - Reuse persistent subprocess if alive
+      - Send JSON on stdin, read JSON-line from stdout
+      - 90-second timeout with auto-restart on hang
+      - Crash detection: poll() + exit code check
+    One-Shot Mode:
+      - subprocess.Popen with --json flag
+      - 30-second timeout (GUI tools exempt)
+
+  Smart Truncation (_smart_truncate):
+    For JSON results with "page" key:
+      - Preserves high-priority sections: PAGE, ELEMENTS, FORM STATUS, DIALOG
+      - Truncates low-priority sections: TEXT, IFRAMES
+      - Priority-based section trimming via _truncate_page_text()
+    Standard limit: 16,000 chars
+    Content-heavy actions (read, search, select_text): 28,000 chars
+    Fallback: blind truncation at limit
+
+────────────────────────────────────────────────────────────────────────────
+5.3  CONTEXT WINDOW MANAGEMENT
+────────────────────────────────────────────────────────────────────────────
+
+  _prune_context(messages, max_chars=80000)
+
+  Problem: messages list grows unbounded. With Qwen 3.5-9B's 32K context
+  window (~100K chars), long sessions overflow and cause quality degradation.
+
+  Solution: Sliding window that prunes oldest, largest messages first.
+
+  Algorithm:
+    1. Sum all message content lengths
+    2. If under 80K chars, return (no pruning needed)
+    3. Always keep: system message (index 0), last 6 messages
+    4. Find the largest prunable message (usually a tool result)
+    5. Replace with "[earlier tool result pruned for context]"
+    6. Repeat until under threshold
+
+  Why 80K chars:
+    ~80K chars ≈ ~20K tokens (4 chars/token average for mixed content)
+    Leaves ~12K tokens for system prompt + generation headroom
+    Total: ~32K tokens = Qwen 3.5-9B full context window
+
+────────────────────────────────────────────────────────────────────────────
+5.4  STALL DETECTION & RECOVERY
+────────────────────────────────────────────────────────────────────────────
+
+  _detect_stall(tool_name, action) — called after every tool execution.
+
+  Tracks action history as list of "tool:action" strings.
+
+  Navigation Stall (threshold: 2 repeats):
+    If 2+ new_tab/browse actions in last 4 steps → redirect loop detected.
+    Recovery: "Use navigation menu elements, click #N refs, try click_at"
+
+  General Stall (threshold: 3 identical actions):
+    Snapshot stall → "Try iframe, scroll, dismiss, wait, select_text"
+    Read stall → "Try snapshot, scroll, wait, select_text"
+    Click stall → "Snapshot for fresh refs, try different element"
+    Dismiss stall → "Snapshot to see page, proceed with task"
+
+  History is reset after each stall detection to prevent repeated warnings.
+
+────────────────────────────────────────────────────────────────────────────
+5.5  CONTEXT-SENSITIVE OBSERVATION HINTS
+────────────────────────────────────────────────────────────────────────────
+
+  After tool execution, the observation suffix is customized based on
+  the result content to guide the LLM's next action:
+
+  Empty/Sparse Snapshot → "Content probably in iframe. Try iframe list/enter."
+  NOT_FOUND / STALE_REF → "Page changed. Use updated #N refs from snapshot."
+  Search Results → "Open relevant results in new tabs, read each, synthesize."
+  Read Action → "Note key facts, continue reading or synthesize."
+  New Tab Detected → "Popup/tab opened. Snapshot to see new page."
+  Dismiss Action → "Overlays cleared. Snapshot and proceed immediately."
+  Redirect Warning → "Do NOT retry URL. Use navigation menu elements."
+  CAPTCHA Detected → "Cannot solve CAPTCHA. Go back, try different link."
+  Empty Read → "Page may not have loaded. Wait, scroll, try again."
+
+  Budget Warnings:
+    ≤5 steps remaining → "Wrap up or summarize progress."
+    ≤20 steps remaining → "(N steps left)"
+    Every 50 steps → "[Step N — running smoothly]"
+
+────────────────────────────────────────────────────────────────────────────
+5.6  SWARM COORDINATOR
+────────────────────────────────────────────────────────────────────────────
+
+  class SwarmCoordinator — decomposes tasks and manages parallel execution.
+
+  Architecture:
+    The swarm uses a Planner + Executor pattern (same as Manus, OpenManus,
+    OWL/CAMEL-AI). One LLM reasons and plans; deterministic workers execute.
+
+    Key constraint: Only 1 LLM can run on M4 16GB (model uses ~5 GB).
+    Workers therefore follow pre-planned action sequences without their own
+    LLM instances. This is more like Manus's "sub-agent with tool scripts"
+    than Browser-Use's "multiple independent agent instances."
+
+  PLAN_PROMPT_TEMPLATE (v3.2 — URL extraction + dual mode):
+    The prompt is built dynamically by build_plan_prompt(scout_data).
+    It receives REAL page data with actual links and URLs.
+
+    NEW: _extract_links() parses scout snapshot for link elements:
+      [N] link "text" -> URL
+    These are injected into the prompt as CLICKABLE LINKS section.
+
+    Two execution modes:
+    MODE A (parallel tabs): When real URLs are found in CLICKABLE LINKS.
+      Workers: new_tab(EXACT_URL) → dismiss → wait(stable) → read()
+    MODE B (sequential clicks): When NO URLs available (only #N refs).
+      Workers: click(#N) → wait(stable) → read() → back → wait(stable)
+      Workers share the scout tab, execute sequentially.
+
+    Rules enforced:
+    - NEVER fabricate/guess/construct URLs — copy-paste from CLICKABLE LINKS only
+    - Terminal workers: specify "tool" per step (e.g. macos_terminal)
+    - Max 3 workers
+    - If task can't be parallelized, output regular tool call instead
+
+  SYNTHESIZE_PROMPT:
+    After all workers complete, presents their results to the LLM:
+    - Formatted result text per worker
+    - Content extraction from snapshots/reads (titles, URLs, text)
+    - Worker status (done/error) and completion stats
+    LLM synthesizes into unified response or requests follow-up actions.
+
+  Swarm Activation: ALWAYS ON (no heuristic gating)
+    Every task enters the swarm pipeline. The LLM naturally decides
+    whether to output a swarm_plan (parallel) or a regular tool call
+    (sequential). No is_swarm_candidate() heuristic needed.
+
+  _extract_links(snapshot_text):
+    Static method. Parses snapshot text with regex to find:
+      [N] link "text" -> URL (or without URL)
+    Returns list of {"ref": N, "text": "...", "url": "..."} dicts.
+    Used by build_plan_prompt() to create CLICKABLE LINKS section.
+
+  build_plan_prompt(scout_data):
+    Class method. Extracts links, formats CLICKABLE LINKS section,
+    fills PLAN_PROMPT_TEMPLATE. If URLs found → suggests MODE A.
+    If no URLs → suggests MODE B (click-based).
+
+  _is_404_or_error(result_data):
+    Static method. Checks page title, URL, content for 404 indicators.
+    Used during worker execution to detect failed navigations early.
+
+  _parse_swarm_plan(llm_response):
+    Strips <think> blocks, extracts JSON via balanced-brace matching,
+    validates presence of "swarm_plan" key.
+
+  format_results_for_llm(results):
+    Condenses worker results into context-friendly text:
+    - Per-worker header with status
+    - Per-step summary: action, description, extracted content
+    - Content truncated to 1500 chars per step
+    - Total output capped at 2 * OBSERVATION_CHARS_CONTENT (56K chars)
+
+────────────────────────────────────────────────────────────────────────────
+5.7  SWARM WORKERS
+────────────────────────────────────────────────────────────────────────────
+
+  class SwarmWorker — lightweight state tracker for a single worker.
+
+  Attributes:
+    worker_id:    int — unique identifier
+    tab_index:    int — browser tab number (1-indexed, assigned after new_tab)
+    status:       str — "idle" | "running" | "done" | "error"
+    results:      List[Dict] — per-step result accumulator
+    error:        Optional[str] — error message if status == "error"
+    plan:         List[Dict] — action sequence to execute
+    current_step: int — progress counter
+
+  Workers don't execute themselves — the SwarmCoordinator drives them
+  via _exec_step() in the round-robin loop.
+
+────────────────────────────────────────────────────────────────────────────
+5.8  SwarmAgentLoop (UNIFIED ENTRY POINT)
+────────────────────────────────────────────────────────────────────────────
+
+  class SwarmAgentLoop(AgentLoop) — always-on swarm pipeline.
+
+  run(messages, generate_fn):
+    - If swarm_enabled → _run_swarm() (ALWAYS, no heuristic gating)
+    - If swarm_disabled → super().run() (standard sequential)
+
+  _run_swarm(messages, generate_fn) — 4-Phase Pipeline (v3.2):
+
+    Phase 0 — SCOUT:
+      - Let LLM make its first tool call normally (no plan prompt yet)
+      - Execute the tool call (e.g., new_tab to target URL)
+      - For browser navigation: auto-dismiss overlays + fresh snapshot
+      - Result: LLM now has REAL page data with actual links/URLs
+      - If LLM responds conversationally (no tool call) → RETRY ONCE
+        (v3.2: empty/thinking responses get one retry before returning)
+      - Scout data truncated at 18000 chars (up from 14000) to preserve link URLs
+
+    Phase 1 — PLAN:
+      - Extract links from scout data via _extract_links()
+      - Build dynamic plan prompt via build_plan_prompt() with CLICKABLE LINKS
+      - Feed scout results + plan prompt to LLM
+      - LLM sees real page content + explicit link list
+      - Creates worker plan using MODE A (URLs) or MODE B (clicks)
+      - Or LLM outputs regular tool call (no parallelism needed)
+      - If no swarm_plan parsed → seamless fallback to sequential _loop()
+
+    Phase 2 — DISPATCH:
+      - coordinator.execute_swarm(plan, persistent)
+      - Auto-detects MODE A vs MODE B from plan structure
+      - 404 detection on all navigation steps
+      - Returns list of worker results
+      - If ALL workers fail → fallback message + sequential _loop()
+
+    Phase 3 — SYNTHESIZE:
+      - Format results via format_results_for_llm()
+      - Append planning response + results to messages
+      - Call generate_fn() with SYNTHESIZE_PROMPT
+      - If LLM emits a tool call → switch to sequential loop for follow-up
+      - If LLM responds conversationally → task complete
+
+  Fallback Guarantees:
+    - If scout returns empty/thinking → retry once before giving up
+    - If scout returns no tool call → conversational response
+    - If plan parsing fails → seamless fallback to sequential
+    - If all workers fail (404s) → recovery message + sequential fallback
+    - If partial workers fail → partial results synthesized
+    - If synthesis requests follow-up → switches to standard loop
+    - User can toggle with "swarm on/off" commands
+
+────────────────────────────────────────────────────────────────────────────
+5.9  DUAL-MODE EXECUTION (v3.2)
+────────────────────────────────────────────────────────────────────────────
+
+  execute_swarm() auto-detects the execution mode from the plan:
+
+  MODE A — PARALLEL TABS (round-robin interleaving):
+    When workers start with new_tab — each gets its own tab.
+
+    Phase 1 — Tab Opening (sequential):
+      For each worker:
+        1. Execute new_tab step → opens new browser tab
+        2. 404 DETECTION: Check if page is 404/error/redirect → mark failed
+        3. Auto-dismiss overlays
+        4. Query tabs list to determine this worker's tab index
+
+    Phase 2 — Round-Robin Steps:
+      for step_idx in range(1, max_steps):
+        for each active worker:
+          1. Switch to worker's tab: tabs(value="switch N")
+          2. Execute worker's current step
+          3. 404 detection on navigation steps
+          4. Record result, advance step counter
+
+  MODE B — SEQUENTIAL CLICKS (on scout tab):
+    When workers start with click/click_at — they share the scout tab.
+
+    For each worker sequentially:
+      1. Click element ref on current page → navigates to article
+      2. Wait for page load
+      3. Read content
+      4. Go back to original page
+      5. Wait for page reload
+
+    Benefits: No URL needed — uses real element refs. Works when hrefs
+    are not in snapshot or are JavaScript-based. Slower but more reliable.
+
+  404/ERROR DETECTION:
+    _is_404_or_error() checks after each navigation:
+      - Title contains: "404", "not found", "something has gone wrong"
+      - URL contains: "err=404", "/404"
+      - Page text contains error phrases
+      - redirect_warning present
+    On detection: worker marked as error, tries to go back.
+
+  ALL-FAIL FALLBACK:
+    If ALL workers fail (404s), _run_swarm() injects a recovery message
+    telling the LLM to switch to click-based navigation using element refs.
+    Falls back to sequential _loop().
+
+  Benefits of Interleaving (MODE A):
+    - Pages load while other workers execute (natural parallelism)
+    - 2-3x faster than strictly sequential per-worker execution
+    - User sees browser tabs switching = visual confirmation
+    - No thread safety issues — all commands serialize through one pipe
+
+  Performance Characteristics:
+    MODE A: 3 workers, 4 steps each: ~15-25s
+    MODE B: 3 workers, 5 steps each: ~30-45s (sequential but reliable)
+    Overhead per tab switch: ~200ms
+
+
+================================================================================
+6. ai.py — ENTRY POINT & LLM BRIDGE
+================================================================================
+
+220 lines. CLI entry point for Agent F (Amber).
+
+────────────────────────────────────────────────────────────────────────────
+6.1  MODEL LOADING
+────────────────────────────────────────────────────────────────────────────
+
+  1. Read qwen.npz manifest via numpy.load()
+  2. Extract meta_json → get HuggingFace repo ID
+  3. Call mlx_lm.load(repo) → returns (model, tokenizer)
+  4. Model loads into Apple Silicon unified memory (~5 GB for 9B 4-bit)
+
+  The .npz file is an indirection layer — it doesn't contain weights,
+  just a pointer to the HuggingFace model repo.
+
+────────────────────────────────────────────────────────────────────────────
+6.2  TOKEN BUDGET & GENERATION
+────────────────────────────────────────────────────────────────────────────
+
+  max_tokens = 4096
+
+  Rationale: On M4 16GB with Qwen 3.5-9B 4-bit:
+  - Model: ~5 GB
+  - KV cache for 32K context: ~2-3 GB
+  - Browser (Edge + Playwright): ~2-4 GB
+  - OS/system: ~3 GB
+  - 4096 generation tokens fits comfortably without OOM risk
+  - Enough for multi-paragraph reasoning + complex JSON tool calls
+  - Previous limit (1024) truncated complex responses
+
+  Generation Flow:
+    prompt = tokenizer.apply_chat_template(messages, tokenize=False,
+                                           add_generation_prompt=True)
+    for chunk in generate(model, tokenizer, prompt=prompt,
+                         verbose=False, max_tokens=4096):
+        # Stream chunks to terminal with think-tag filtering
+        full_response += chunk
+    return full_response
+
+────────────────────────────────────────────────────────────────────────────
+6.3  THINK-TAG STREAMING FILTER
+────────────────────────────────────────────────────────────────────────────
+
+  Qwen 3.5 uses <think>...</think> tags for chain-of-thought reasoning.
+  By default, these are hidden from the user:
+
+  - Tokens stream into output_buffer
+  - If <think> detected: print preceding text, show cloud emoji, enter
+    thinking mode (suppress output)
+  - If </think> detected: clear thinking indicator, resume output
+  - Partial tag buffering handles tags split across chunks
+
+  "show think" prefix: User can prefix any message with "show think" to
+  see the full reasoning trace including <think> blocks.
+
+────────────────────────────────────────────────────────────────────────────
+6.4  SWARM MODE UI
+────────────────────────────────────────────────────────────────────────────
+
+  Commands:
+    "swarm"        → Show current swarm mode status (ON/OFF)
+    "swarm on"     → Enable swarm mode
+    "swarm off"    → Disable swarm mode (all tasks run sequentially)
+
+  Startup Display:
+    "Amber Ready. (Type 'exit' to quit, 'stop' to pause agent | Swarm: ON (3 workers))"
+
+  When swarm activates:
+    Terminal output shows:
+      SWARM: Parallel execution candidate detected.
+      SWARM: Requesting execution plan from coordinator...
+      Amber (planning): [LLM plans the decomposition]
+      ==================================================
+      SWARM: Dispatching 3 workers (parallel tabs)    ← or (sequential click)
+      ==================================================
+        Worker 0: Read: Iran conflict article (4 steps)
+        Worker 1: Read: Louisiana earthquake (4 steps)
+        Worker 2: Read: Oracle layoffs (4 steps)
+      ──────────────────────────────────────────────────
+        Phase 1: Opening tabs...
+        [W0] Tab 3 opened
+        [W1] Tab 4 opened
+        [W2] 404/error on https://... — marking failed    ← NEW: 404 detection
+        Phase 2: Executing remaining steps (2 active workers)...
+        [W0] dismiss
+        [W1] dismiss
+        [W0] read
+        [W1] read
+      ──────────────────────────────────────────────────
+        [+] Worker 0: done (4/4 steps)
+        [+] Worker 1: done (4/4 steps)
+        [x] Worker 2: error (1/4 steps)
+      ==================================================
+      SWARM: 2/3 workers succeeded (18.3s total)
+        1 workers failed (404/error) — results may be partial
+        ...
+        Worker 0: done (5/5 steps)
+        Worker 1: done (5/5 steps)
+        Worker 2: done (4/4 steps)
+      ==================================================
+      SWARM: All workers complete. Synthesizing results...
+      ==================================================
+      Amber (synthesizing): [LLM synthesizes all findings]
+
+
+================================================================================
+7. DATA FLOW: END-TO-END REQUEST LIFECYCLE
+================================================================================
+
+  Sequential Mode (single-site task):
+
+    User types: "go to cnn.com and read the top article"
+    │
+    ▼
+    ai.py: messages.append({"role": "user", "content": "..."})
+    ai.py: agent_loop.run(messages, generate_fn)
+    │
+    ▼
+    SwarmAgentLoop.run():
+      is_swarm_candidate("go to cnn.com...") → False
+      → super().run() → AgentLoop.run() → _loop()
+    │
+    ▼
+    _loop() iteration 1:
+      generate_fn(messages) → LLM outputs:
+        '<think>I need to open CNN first.</think>
+         {"tool":"edge","args":{"action":"new_tab","url":"https://cnn.com"}}'
+      parse_tool_call() → {"tool":"edge","args":{"action":"new_tab",...}}
+      execute_tool("edge", args, persistent) →
+        → _server_communicate() → edge.py server process
+        → AetherEdge.process({"action":"new_tab","url":"https://cnn.com"})
+        → _show_action("Opening: https://cnn.com")
+        → context.new_page() → page.goto() → _inject_hooks()
+        → snapshot() → [5-tier fallback] → JSON result
+      _smart_truncate(result) → fit to 16K chars
+      _detect_stall("edge", "new_tab") → None
+      messages.append(assistant=response, user=tool_result)
+    │
+    ▼
+    _loop() iteration 2:
+      generate_fn(messages) → LLM sees page, clicks top article
+      ... continues until LLM responds conversationally ...
+    │
+    ▼
+    Return final response to ai.py → print to terminal
+
+
+  Swarm Mode (multi-site task):
+
+    User types: "research and compare articles from CNN and BBC"
+    │
+    ▼
+    SwarmAgentLoop.run():
+      is_swarm_candidate("research and compare...") → True
+      → _run_swarm()
+    │
+    ▼
+    Phase 1 — PLAN:
+      plan_messages = messages + [PLAN_PROMPT]
+      generate_fn(plan_messages) → LLM outputs swarm_plan JSON
+      _parse_swarm_plan() → [
+        {worker_id:0, steps:[new_tab CNN, snapshot, read, ...]},
+        {worker_id:1, steps:[new_tab BBC, snapshot, read, ...]}
+      ]
+    │
+    ▼
+    Phase 2 — DISPATCH:
+      execute_swarm(plan, persistent):
+        Tab opening: W0→new_tab(cnn.com), W1→new_tab(bbc.com)
+        Round-robin: switch tab 1→W0 step 2, switch tab 2→W1 step 2,
+                     switch tab 1→W0 step 3, switch tab 2→W1 step 3, ...
+    │
+    ▼
+    Phase 3 — SYNTHESIZE:
+      format_results_for_llm() → condense worker results
+      messages += [assistant=plan, user=SYNTHESIZE_PROMPT+results]
+      generate_fn(messages) → LLM synthesizes comparison
+      → If tool call in response → switch to sequential _loop()
+      → If conversational → return final response
+
+
+================================================================================
+8. UPGRADE CHANGELOG (v21 → v22 + Swarm v3.2)
+================================================================================
+
+  edge.py v21 → v22:
+  ─────────────────
+  + 5-tier read_page() fallback (was single-tier JS only)
+  + _read_page_js() extracted as reusable helper
+  + Redirect detection in new_tab() and browse()
+  + _urls_differ() URL comparison helper
+  + _extract_nav_menu() navigation menu extraction
+  + Click-through navigation fallback (auto goto href on failed nav click)
+  + CAPTCHA detection (_detect_captcha) with reCAPTCHA/hCaptcha/Turnstile
+  + CAPTCHA warning injection into snapshot results
+  + Visual feedback system:
+    + _inject_hooks() upgraded: cursor dot, click ripple, action overlay,
+      element highlight helpers (__aether_show_status, __aether_hide_status,
+      __aether_highlight)
+    + _show_action(), _hide_action(), _highlight_ref() methods
+    + Visual feedback in: click, fill, select, check, hover, new_tab,
+      browse, scroll (8 action methods total)
+  + _bezier_move() upgraded: min 8 steps (was 3-5), 8-18ms delays (was 1-5ms)
+  + _human_delay() slightly increased fast-mode delays for visibility
+  + Smooth scrolling via JS scrollBy({behavior: 'smooth'})
+  + TOOL_METADATA description updated to v22.0
+  + _detect_404(): 404/error page detection for new_tab/browse
+  + _snapshot_native_pw(): now includes href URLs for links (-> URL)
+
+  agent.py v2.0 → v3.0 → v3.1 → v3.2:
+  ─────────────────────────────────────
+  v3.0:
+  + SwarmCoordinator class: plan decomposition, worker management
+  + SwarmWorker class: tab tracking, plan/step state, result accumulation
+  + SwarmAgentLoop class: swarm/sequential mode switching
+  + Round-robin interleaved tab execution with tab-switching
+  + Context window management (_prune_context): sliding window pruning
+  + Navigation/read stall detection
+  + System prompt: NAVIGATION, READING ARTICLES, CAPTCHA HANDLING sections
+  + Observation hints: redirect, CAPTCHA, empty read detection
+
+  v3.1 (bug fixes from Yahoo News swarm failure):
+  + SCOUT PHASE: LLM makes first tool call normally, we execute it,
+    auto-dismiss overlays, get clean snapshot — LLM sees REAL page data
+    before creating worker plans (fixes blind #N ref problem)
+  + PLAN_PROMPT rewritten: emphasizes REAL URLs from scout, warns against
+    blind #N refs and fabricated URLs, includes terminal tool examples
+  + ALWAYS-ON swarm: removed is_swarm_candidate() heuristic gating,
+    every task enters swarm pipeline, LLM decides if parallelism helps
+  + _exec_step: flexible tool targeting (step.get("tool")), better
+    description display (action summary fallback instead of "Step N")
+  + execute_swarm: auto-dismiss on each new tab, improved tab_index
+    detection with proper fallback (+2 for about:blank tab)
+  + Tab switching skipped for non-browser tools (terminal workers)
+  + Stop listener added to _run_swarm (was missing, caused no Ctrl+S)
+  + Terminal swarm support: workers can specify "tool" per step for
+    fterminal, macos_terminal, or any registered tool
+
+  v3.2 (URL hallucination fix + dual-mode execution):
+  + _extract_links(): parses scout snapshot for [N] link "text" -> URL
+  + build_plan_prompt(): dynamic prompt with CLICKABLE LINKS section
+  + PLAN_PROMPT_TEMPLATE: dual-mode — MODE A (parallel new_tab) vs
+    MODE B (sequential click on scout tab)
+  + execute_swarm() MODE B: sequential click-and-read on shared tab
+    (click → wait → read → back → wait per worker)
+  + _is_404_or_error(): detect 404/redirect/error pages in workers
+  + 404 detection during tab opening — mark workers as failed early
+  + ALL-FAIL FALLBACK: if all workers 404 → recovery message + sequential
+  + Scout retry: if scout returns empty/thinking, retry once before giving up
+  + Scout truncation increased: 14000 → 18000 chars to preserve link URLs
+  + Worker output shows elapsed time and success/fail icons
+  + _snapshot_native_pw: includes href URLs for links (critical for swarm)
+
+  macOs-terminal.py v2:
+  ─────────────────────
+  + is_terminal_running(): checks if Terminal.app is already running
+  + get_terminal_window_count(): counts open Terminal windows
+  + target="window": always opens new window (works whether Terminal
+    is running or not) using AppleScript 'do script' without 'in window'
+  + target="tab": uses Cmd+T keystroke to open new tab in existing window
+  + target="current": detects if window exists, opens new one if not
+  + Proper command escaping (backslash + quotes)
+
+  ai.py:
+  ──────
+  + max_tokens: 1024 → 4096 (4x increase, fits M4 16GB comfortably)
+  + System prompt: SWARM MODE always-active, warns about real URLs
+  + Swarm toggle commands: "swarm", "swarm on", "swarm off"
+  + Startup message shows "ALWAYS-ON" swarm status and worker count
+
+
+================================================================================
+9. COMPETITIVE LANDSCAPE POSITIONING
+================================================================================
+
+  How Agent F / AetherEdge compares to state-of-the-art browser agents:
+
+  ┌─────────────────┬───────────┬──────────┬───────────┬──────────┐
+  │ Capability       │ AetherEdge│ Browser  │ Stagehand │ Manus    │
+  │                  │ v22+Sw3.2 │ -Use 1.0 │ v3        │          │
+  ├─────────────────┼───────────┼──────────┼───────────┼──────────┤
+  │ Runs locally     │ YES       │ YES      │ YES       │ No (cloud)│
+  │ No cloud LLM     │ YES (MLX) │ No (API) │ No (API)  │ No (API) │
+  │ Visual feedback   │ YES       │ Partial  │ No        │ YES      │
+  │ Multi-agent swarm │ YES (3)   │ YES (N)  │ No        │ YES      │
+  │ Snapshot fallback │ 5-tier    │ 2-tier   │ 1-tier    │ Screenshot│
+  │ Read fallback     │ 5-tier    │ 1-tier   │ N/A       │ 1-tier   │
+  │ CAPTCHA detection │ YES       │ No       │ No        │ YES      │
+  │ Redirect detect   │ YES       │ No       │ No        │ YES      │
+  │ 404 detect+fallbk│ YES       │ No       │ No        │ Partial  │
+  │ Action cache      │ YES       │ No       │ YES       │ No       │
+  │ A11Y tree         │ YES (T3)  │ No       │ YES (core)│ No       │
+  │ Stealth/anti-bot  │ YES       │ Partial  │ No        │ Partial  │
+  │ Checkbox fallback │ 8 strategies│ 1      │ 1         │ 1        │
+  │ Context pruning   │ YES       │ No       │ N/A       │ YES      │
+  │ Stall detection   │ YES       │ No       │ N/A       │ Partial  │
+  │ Semantic primitives│ YES (S3) │ No       │ YES (core)│ No       │
+  │ Iframe piercing   │ YES       │ YES      │ YES       │ YES      │
+  │ Shadow DOM        │ YES       │ YES      │ YES       │ YES      │
+  │ Human-like input  │ Bezier+jitter│ Basic │ No        │ Basic    │
+  │ Overlay dismiss   │ 60+ patterns│ Basic  │ No        │ Basic    │
+  │ LLM required      │ 1 (local) │ N (API)  │ 1 (API)   │ N (API)  │
+  └─────────────────┴───────────┴──────────┴───────────┴──────────┘
+
+  Unique advantages of this system:
+  1. Fully local — no API keys, no cloud costs, no data leaves the machine
+  2. 5-tier NEVER-empty snapshot + read guarantees (most robust extraction)
+  3. 8-strategy checkbox handler (unmatched for survey automation)
+  4. Swarm with hardware-aware design (1 LLM + N workers, not N LLMs)
+  5. Visual feedback matching Manus-level visibility
+  6. Combined ReAct + Stagehand v3 + Swarm patterns in one system
+
+
+================================================================================
+10. CONFIGURATION REFERENCE
+================================================================================
+
+  edge.py Constants:
+    EDGE_CDP_PORT          = 9222
+    EDGE_PROFILE_BASE      = ~/Library/Application Support/Microsoft Edge/
+    ACTION_CACHE_FILE      = ~/.agentf_edge_action_cache.json
+    LOG_FILE               = ~/.agentf_edge.log
+    SCREENSHOT_DIR         = ~/Desktop/edge_agent/
+    DOWNLOADS_DIR          = ~/Downloads/
+    TRACES_DIR             = ~/Desktop/edge_traces/
+
+  agent.py Constants:
+    FUNCTIONS_DIR          = {BASE_DIR}/agent-functions/
+    LAUNCH_TIMEOUT         = 30.0s    (one-shot tool timeout)
+    MAX_AGENT_STEPS        = 100000   (virtually unlimited)
+    OBSERVATION_CHARS      = 16000    (standard truncation limit)
+    OBSERVATION_CHARS_CONTENT = 28000 (content-heavy actions)
+    SERVER_READ_TIMEOUT    = 90.0s    (server mode response timeout)
+    STALL_THRESHOLD        = 3        (repeated action trigger)
+    STEP_TIME_WARN         = 30.0s    (slow step warning)
+    CONTEXT_PRUNE_LIMIT    = 80000    (chars before pruning kicks in)
+
+  ai.py Configuration:
+    Default weights file:  qwen.npz
+    max_tokens:            4096
+    Swarm default:         ON (3 workers)
+
+  CLI Flags (edge.py):
+    --server               Enter persistent server mode
+    --json '{"action":..}'  One-shot execution
+    --channel msedge|msedge-beta|msedge-dev|msedge-canary
+    --profile <name>       Use named Edge profile
+    --no-stealth           Disable anti-detection
+    --slow                 Human-speed mode (longer delays)
+
+  CLI Flags (ai.py):
+    --weights <path>       Path to model manifest NPZ
+    --agent <path>         Legacy argument (unused)
+
+
+================================================================================
+11. PERFORMANCE CHARACTERISTICS
+================================================================================
+
+  Latency Breakdown (typical):
+
+  LLM Generation:
+    First token:    ~500ms
+    Full response:  2-8s (depends on response length)
+    4096 tokens:    ~15-20s worst case
+
+  Tool Execution:
+    Server mode command: 50-200ms (cached/simple)
+    Snapshot:            200-500ms
+    Navigation:          1-5s (depends on site)
+    Read page:           200-800ms (depends on tier)
+    Click:               100-400ms (includes bezier + highlight)
+    Fill:                100-500ms (depends on field count)
+    Dismiss:             200-1000ms (scans 60+ patterns)
+    Tab switch:          ~200ms
+
+  End-to-End Step:
+    Simple action:       3-5s (generate + execute + observe)
+    Navigation action:   5-10s (generate + navigate + wait + snapshot)
+    Content-heavy:       8-15s (generate + read + truncate + observe)
+
+  Swarm Execution:
+    2 workers, 5 steps each: ~15-20s total
+    3 workers, 5 steps each: ~20-30s total
+    Sequential equivalent:   ~30-45s
+    Speedup:                 ~1.5-2x
+
+  Memory Usage:
+    Qwen 3.5-9B 4-bit:  ~5 GB
+    Edge browser:        1-3 GB (varies with tabs/sites)
+    Playwright runtime:  ~200 MB
+    Python + agent.py:   ~100 MB
+    Peak (3-tab swarm):  ~14-15 GB
+    OS + system:         ~3 GB
+    Total peak:          ~15-16 GB (fits 16 GB with minimal swap)
+
+================================================================================
+  END OF DOCUMENT
+  AetherEdge v22.0 + Agent Swarm v3.0
+  Agent F (Amber) — March 2026
+================================================================================
